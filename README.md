@@ -21,7 +21,7 @@ This repository is designed to run on **Render** as a backend API.
 ### 1. Fork or Clone this repository
 
 ```bash
-git clone [https://github.com/paraskavitkar/AI-VibeSync.git](https://github.com/paraskavitkar/AI-VibeSync.git)
+git clone (https://github.com/paraskavitkar/AI-VibeSync.git)
 cd AI-VibeSync
 
 ```
