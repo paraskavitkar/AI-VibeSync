@@ -4,5 +4,3 @@ requests
 spotipy
 google-genai
 python-multipart
-
-
