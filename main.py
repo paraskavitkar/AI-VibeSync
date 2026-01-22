@@ -150,18 +150,29 @@ def get_perfect_song_match(summary):
 
 # --- DOWNLOAD LOGIC (CODE 2 INTEGRATION) ---
 
-def download_spotify_as_mp3(url):
-    if not url or "spotify.com" not in url:
-        return None
-    try:
-        # Get Track Info
-        track = sp.track(url)
-        track_name = track['name']
-        search_query = f"{track['artists'][0]['name']} - {track_name} official audio"
-        
-        # Save to /tmp/ for Render deployment
-        output_path = f"/tmp/{track_name}.mp3"
+def download_spotify_as_mp3(url, fallback_name=None):
+    # Loosen the check to allow any spotify link, or use the fallback name
+    search_query = None
+    track_name = "downloaded_audio"
 
+    if url and "open.spotify.com" in url:
+        try:
+            track = sp.track(url)
+            track_name = track['name']
+            search_query = f"{track['artists'][0]['name']} - {track_name} official audio"
+        except Exception as e:
+            print(f"⚠️ Spotify Metadata fetch failed: {e}")
+
+    # If Spotify fails or link is invalid, use the Gemini-provided song name
+    if not search_query and fallback_name:
+        search_query = f"{fallback_name} official audio"
+        track_name = fallback_name.split("-")[-1].strip()
+
+    if not search_query:
+        return None
+
+    try:
+        output_path = f"/tmp/{track_name}.mp3"
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': f'/tmp/{track_name}.%(ext)s',
@@ -175,14 +186,14 @@ def download_spotify_as_mp3(url):
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print(f"[INFO] Downloading MP3: {search_query}")
+            print(f"[INFO] Attempting download: {search_query}")
             ydl.download([f"ytsearch1:{search_query}"])
         
         return output_path
     except Exception as e:
-        print(f"[ERROR] Download Failed: {e}")
+        print(f"[ERROR] yt-dlp failed: {e}")
         return None
-
+        
 # --- FASTAPI UPLOAD ROUTE ---
 
 @app.post("/upload")
@@ -212,8 +223,11 @@ async def upload_video(file: UploadFile = File(...)):
         return JSONResponse({"error": "Song match failed"}, status_code=500)
 
     # 5. AUTOMATIC DOWNLOAD (New Integrated Step)
-    mp3_file_path = download_spotify_as_mp3(song_data["spotify_link"])
-    
+    # 5. AUTOMATIC DOWNLOAD (With Fallback)
+    mp3_file_path = download_spotify_as_mp3(
+        song_data.get("spotify_link"), 
+        fallback_name=song_data.get("song_name")
+    )    
     if mp3_file_path:
         song_data["download_status"] = "success"
         song_data["local_path"] = mp3_file_path
@@ -224,3 +238,4 @@ async def upload_video(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
