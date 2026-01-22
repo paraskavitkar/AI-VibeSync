@@ -136,6 +136,10 @@ def get_perfect_song_match(summary):
         config=types.GenerateContentConfig(tools=[search_tool])
     )
 
+    if not response.text:
+        print("❌ Gemini returned no text. Possible safety block or empty response.")
+        return None
+
     json_string = response.text.strip()
     if json_string.startswith('```'):
         parts = json_string.split("```")
@@ -144,8 +148,12 @@ def get_perfect_song_match(summary):
             if json_string.lower().startswith("json"):
                 json_string = json_string[4:].strip()
 
-    data = json.loads(json_string)
-    return get_real_spotify_url(data.get("song_name"))
+    try:
+        data = json.loads(json_string)
+        return get_real_spotify_url(data.get("song_name"))
+    except json.JSONDecodeError:
+        print(f"❌ Failed to parse JSON from Gemini: {json_string}")
+        return None
 
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name)
@@ -212,6 +220,11 @@ def upload_video(file: UploadFile = File(...)):
         return JSONResponse({"error": "summary failed"}, 500)
 
     spotify_link = get_perfect_song_match(summary)
+
+    # If spotify_link is None (Gemini failed or Spotify search failed), we can't download.
+    if not spotify_link:
+         return JSONResponse({"error": "failed to find a matching song"}, 500)
+
     mp3_path = download_spotify_as_mp3(spotify_link)
 
     if not mp3_path or not os.path.exists(mp3_path):
