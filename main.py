@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import json
+import re
 import requests
 import spotipy
 import yt_dlp
@@ -136,10 +137,17 @@ def get_perfect_song_match(summary):
 
     json_string = response.text.strip()
     if json_string.startswith('```'):
-        json_string = json_string.split("```")[1]
+        parts = json_string.split("```")
+        if len(parts) > 1:
+            json_string = parts[1].strip()
+            if json_string.lower().startswith("json"):
+                json_string = json_string[4:].strip()
 
     data = json.loads(json_string)
     return get_real_spotify_url(data.get("song_name"))
+
+def sanitize_filename(name):
+    return re.sub(r'[\\/*?:"<>|]', "", name)
 
 def download_spotify_as_mp3(url):
     if not url:
@@ -147,7 +155,8 @@ def download_spotify_as_mp3(url):
 
     track = sp.track(url)
     search_query = f"{track['artists'][0]['name']} - {track['name']} official audio"
-    output = f"{DOWNLOAD_DIR}/{track['name']}"
+    safe_name = sanitize_filename(track['name'])
+    output = f"{DOWNLOAD_DIR}/{safe_name}"
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -170,7 +179,7 @@ def download_spotify_as_mp3(url):
 app = FastAPI()
 
 @app.post("/upload")
-async def upload_video(file: UploadFile = File(...)):
+def upload_video(file: UploadFile = File(...)):
     filename = file.filename
 
     with open(filename, "wb") as buffer:
@@ -190,6 +199,9 @@ async def upload_video(file: UploadFile = File(...)):
 
     spotify_link = get_perfect_song_match(summary)
     mp3_path = download_spotify_as_mp3(spotify_link)
+
+    if not mp3_path or not os.path.exists(mp3_path):
+        return JSONResponse({"error": "mp3 download failed"}, 500)
 
     return FileResponse(
         mp3_path,
