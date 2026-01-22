@@ -6,6 +6,7 @@ import re
 import requests
 import spotipy
 import yt_dlp
+from yt_dlp.utils import DownloadError
 from spotipy.oauth2 import SpotifyClientCredentials
 from google import genai
 from google.genai import types
@@ -167,10 +168,23 @@ def download_spotify_as_mp3(url):
             'preferredquality': '192',
         }],
         'noplaylist': True,
+        'nocheckcertificate': True,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([f"ytsearch1:{search_query}"])
+    try:
+        print(f"🎵 Attempting to download via YouTube: {search_query}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"ytsearch1:{search_query}"])
+    except DownloadError as e:
+        print(f"⚠️ YouTube download failed: {e}")
+        print(f"🔄 Trying SoundCloud fallback for: {search_query}")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([f"scsearch1:{search_query}"])
+        except Exception as e2:
+            print(f"❌ SoundCloud fallback also failed: {e2}")
+            return None
 
     return f"{output}.mp3"
 
