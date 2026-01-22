@@ -150,49 +150,47 @@ def get_perfect_song_match(summary):
 
 # --- DOWNLOAD LOGIC (CODE 2 INTEGRATION) ---
 
-def download_spotify_as_mp3(url, fallback_name=None):
-    # Loosen the check to allow any spotify link, or use the fallback name
-    search_query = None
-    track_name = "downloaded_audio"
+def download_vibe_audio(song_name):
+    """
+    Downloads audio using SoundCloud as the primary source to avoid 
+    YouTube's bot detection on cloud servers.
+    """
+    # Use SoundCloud search prefix (scsearch1:)
+    search_query = f"scsearch1:{song_name} official"
+    safe_name = "".join(x for x in song_name if x.isalnum() or x in " -_").strip()
+    output_tmpl = f"/tmp/{safe_name}.%(ext)s"
 
-    if url and "open.spotify.com" in url:
-        try:
-            track = sp.track(url)
-            track_name = track['name']
-            search_query = f"{track['artists'][0]['name']} - {track_name} official audio"
-        except Exception as e:
-            print(f"⚠️ Spotify Metadata fetch failed: {e}")
-
-    # If Spotify fails or link is invalid, use the Gemini-provided song name
-    if not search_query and fallback_name:
-        search_query = f"{fallback_name} official audio"
-        track_name = fallback_name.split("-")[-1].strip()
-
-    if not search_query:
-        return None
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_tmpl,
+        'quiet': True,
+        'noplaylist': True,
+        # Browser impersonation headers
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+    }
 
     try:
-        output_path = f"/tmp/{track_name}.mp3"
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': f'/tmp/{track_name}.%(ext)s',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'quiet': True,
-            'noplaylist': True,
-        }
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print(f"[INFO] Attempting download: {search_query}")
-            ydl.download([f"ytsearch1:{search_query}"])
-        
-        return output_path
-    except Exception as e:
-        print(f"[ERROR] yt-dlp failed: {e}")
-        return None
+            print(f"[INFO] Searching SoundCloud for: {song_name}")
+            info = ydl.extract_info(search_query, download=True)
+            # Find the actual filename created (might be .webm or .m4a)
+            actual_filename = ydl.prepare_filename(info)
+            return actual_filename
+    except Exception as sc_error:
+        print(f"[WARNING] SoundCloud search failed: {sc_error}")
+        # Secondary fallback to YouTube if SoundCloud fails
+        try:
+            print(f"[INFO] Falling back to YouTube search...")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"ytsearch1:{song_name} audio", download=True)
+                return ydl.prepare_filename(info)
+        except Exception as yt_error:
+            print(f"[ERROR] All download sources failed: {yt_error}")
+            return None
         
 # --- FASTAPI UPLOAD ROUTE ---
 
@@ -222,15 +220,12 @@ async def upload_video(file: UploadFile = File(...)):
     if not song_data or "spotify.com" not in song_data.get("spotify_link", ""):
         return JSONResponse({"error": "Song match failed"}, status_code=500)
 
-    # 5. AUTOMATIC DOWNLOAD (New Integrated Step)
-    # 5. AUTOMATIC DOWNLOAD (With Fallback)
-    mp3_file_path = download_spotify_as_mp3(
-        song_data.get("spotify_link"), 
-        fallback_name=song_data.get("song_name")
-    )    
-    if mp3_file_path:
+    # 5. AUTOMATIC DOWNLOAD (SoundCloud First)
+    final_audio_path = download_vibe_audio(song_data.get("song_name"))
+    
+    if final_audio_path:
         song_data["download_status"] = "success"
-        song_data["local_path"] = mp3_file_path
+        song_data["local_path"] = final_audio_path
     else:
         song_data["download_status"] = "failed"
 
@@ -238,4 +233,5 @@ async def upload_video(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
 
