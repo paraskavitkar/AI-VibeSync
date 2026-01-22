@@ -4,5 +4,5 @@ requests
 spotipy
 yt-dlp
 python-multipart
-google-generativeai
 ffmpeg-python
+google-genai
