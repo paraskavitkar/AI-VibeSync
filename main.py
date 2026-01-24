@@ -152,7 +152,13 @@ def get_perfect_song_match(summary):
     if json_string.startswith('```'):
         json_string = json_string.split("```")[1]
 
-    data = json.loads(json_string)
+    try:
+        data = json.loads(json_string)
+    except Exception as e:
+        print(f"❌ JSON Parse Error: {e}")
+        print(f"📄 Raw Response: {response.text}")
+        return None
+
     return get_real_spotify_url(data.get("song_name"))
 
 def download_spotify_as_mp3(url):
