@@ -10,7 +10,8 @@ from google import genai
 from google.genai import types
 
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 import shutil
 
 # --- CONFIGURATION ---
@@ -69,8 +70,8 @@ def send_link_to_ai(video_url):
             return vid_id
     return None
 
-def wait_for_ready(video_id):
-    print("⏳ AI is watching the video...")
+def wait_for_ready_gen(video_id):
+    yield "⏳ AI is watching the video..."
     endpoint = "https://api.memories.ai/serve/api/v1/list_videos"
     headers = {"Authorization": MEMORIES_API_KEY}
     while True:
@@ -81,13 +82,26 @@ def wait_for_ready(video_id):
             if videos:
                 status = videos[0].get("status")
                 if status == "PARSE":
-                    print("✅ Video is Ready!")
-                    return True
+                    yield "✅ Video is Ready!"
+                    yield True
+                    return
                 if status == "FAIL":
-                    return False
-        sys.stdout.write(".")
-        sys.stdout.flush()
+                    yield False
+                    return
+        yield "."
         time.sleep(3)
+
+def wait_for_ready(video_id):
+    gen = wait_for_ready_gen(video_id)
+    result = False
+    for item in gen:
+        if isinstance(item, bool):
+            result = item
+        else:
+            sys.stdout.write(item)
+            sys.stdout.flush()
+    print()
+    return result
 
 def get_summary(video_id):
     print("📝 Fetching Summary...")
@@ -165,34 +179,99 @@ def download_spotify_as_mp3(url):
 
     return f"{output}.mp3"
 
-# --- FASTAPI WRAPPER (ONLY INPUT/OUTPUT CHANGE) ---
+# --- PIPELINE GENERATOR ---
+
+def process_video_pipeline(filename):
+    yield "Starting processing...\n"
+
+    yield f"Step 1: Uploading '{filename}' to tmpfiles.org...\n"
+    cloud_link = upload_to_tmpfiles(filename)
+    if not cloud_link:
+        yield "❌ tmpfiles upload failed\n"
+        return
+
+    yield "Step 2: Sending to Memories.ai...\n"
+    video_id = send_link_to_ai(cloud_link)
+    if not video_id:
+        yield "❌ video processing failed (send link)\n"
+        return
+
+    yield f"Step 3: Waiting for AI processing (ID: {video_id})...\n"
+    success = False
+    for item in wait_for_ready_gen(video_id):
+        if isinstance(item, bool):
+            success = item
+        else:
+            yield f"{item}\n"
+
+    if not success:
+        yield "❌ video processing failed (wait)\n"
+        return
+
+    yield "Step 4: Fetching summary...\n"
+    summary = get_summary(video_id)
+    if not summary:
+        yield "❌ summary failed\n"
+        return
+    yield f"Summary: {summary}\n"
+
+    yield "Step 5: Matching song...\n"
+    spotify_link = get_perfect_song_match(summary)
+
+    if not spotify_link:
+        yield "❌ No song match found\n"
+        return
+
+    yield f"Spotify Link: {spotify_link}\n"
+
+    yield "Step 6: Downloading MP3...\n"
+    mp3_path = download_spotify_as_mp3(spotify_link)
+
+    if not mp3_path:
+        yield "❌ Download failed\n"
+        return
+
+    filename_only = os.path.basename(mp3_path)
+    # Using a clear marker for the client to parse if needed
+    yield f"DOWNLOAD_READY: /downloads/{filename_only}\n"
+
+# --- FASTAPI WRAPPER ---
 
 app = FastAPI()
+app.mount("/downloads", StaticFiles(directory=DOWNLOAD_DIR), name="downloads")
 
 @app.post("/upload")
-async def upload_video(file: UploadFile = File(...)):
+async def upload_video(file: UploadFile = File(...), debug: bool = False):
     filename = file.filename
 
     with open(filename, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    cloud_link = upload_to_tmpfiles(filename)
-    if not cloud_link:
-        return JSONResponse({"error": "tmpfiles upload failed"}, 500)
+    if debug:
+        return StreamingResponse(process_video_pipeline(filename), media_type="text/plain")
 
-    video_id = send_link_to_ai(cloud_link)
-    if not video_id or not wait_for_ready(video_id):
-        return JSONResponse({"error": "video processing failed"}, 500)
+    # Default behavior: Consume the pipeline to allow code reuse
+    gen = process_video_pipeline(filename)
+    last_msg = ""
+    try:
+        for msg in gen:
+            last_msg = msg
+            print(msg.strip()) # Log to server console
+    except Exception as e:
+        print(f"Pipeline error: {e}")
+        return JSONResponse({"error": str(e)}, 500)
 
-    summary = get_summary(video_id)
-    if not summary:
-        return JSONResponse({"error": "summary failed"}, 500)
+    # Check for success marker
+    if last_msg.startswith("DOWNLOAD_READY: "):
+        path_part = last_msg.replace("DOWNLOAD_READY: ", "").strip()
+        # path_part is like "/downloads/filename.mp3"
+        basename = os.path.basename(path_part)
+        local_path = os.path.join(DOWNLOAD_DIR, basename)
 
-    spotify_link = get_perfect_song_match(summary)
-    mp3_path = download_spotify_as_mp3(spotify_link)
-
-    return FileResponse(
-        mp3_path,
-        media_type="audio/mpeg",
-        filename=os.path.basename(mp3_path)
-    )
+        if os.path.exists(local_path):
+            return FileResponse(local_path, media_type="audio/mpeg", filename=basename)
+        else:
+            return JSONResponse({"error": "File not found after processing"}, 500)
+    else:
+        # Pass the last message as the error reason
+        return JSONResponse({"error": f"Processing failed: {last_msg.strip()}"}, 500)
