@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import shutil
 
 # --- CONFIGURATION ---
@@ -52,10 +52,10 @@ def upload_to_tmpfiles(filename):
                 direct_url = original_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
                 print(f"✅ Upload Success! Direct Link: {direct_url}")
                 return direct_url
-        return None
+        raise Exception(f"Tmpfiles upload failed: {response.text}")
     except Exception as e:
         print(f"❌ Error during upload: {e}")
-        return None
+        raise e
 
 def send_link_to_ai(video_url):
     print("🔗 Sending link to Memories.ai...")
@@ -69,27 +69,19 @@ def send_link_to_ai(video_url):
             vid_id = data['data']['videoNo']
             print(f"✅ AI Accepted Video! ID: {vid_id}")
             return vid_id
-    return None
+        raise Exception(f"Memories.ai upload failed: {data.get('message', 'Unknown error')}")
+    raise Exception(f"Memories.ai API Error: {response.status_code} - {response.text}")
 
-def wait_for_ready(video_id):
-    print("⏳ AI is watching the video...")
+def check_video_status(video_id):
     endpoint = "https://api.memories.ai/serve/api/v1/list_videos"
     headers = {"Authorization": MEMORIES_API_KEY}
-    while True:
-        response = requests.post(endpoint, headers=headers, json={"video_no": video_id})
-        if response.status_code == 200:
-            data = response.json()
-            videos = data.get("data", {}).get("videos", [])
-            if videos:
-                status = videos[0].get("status")
-                if status == "PARSE":
-                    print("✅ Video is Ready!")
-                    return True
-                if status == "FAIL":
-                    return False
-        sys.stdout.write(".")
-        sys.stdout.flush()
-        time.sleep(3)
+    response = requests.post(endpoint, headers=headers, json={"video_no": video_id})
+    if response.status_code == 200:
+        data = response.json()
+        videos = data.get("data", {}).get("videos", [])
+        if videos:
+            return videos[0].get("status")
+    return None
 
 def get_summary(video_id):
     print("📝 Fetching Summary...")
@@ -100,7 +92,8 @@ def get_summary(video_id):
         data = response.json()
         if data.get("success"):
             return data['data']['summary']
-    return None
+        raise Exception(f"Summary generation failed: {data.get('message')}")
+    raise Exception(f"Summary API Error: {response.status_code}")
 
 # --- MUSIC MATCHING & DOWNLOAD HANDOFF ---
 
@@ -137,8 +130,7 @@ def get_perfect_song_match(summary):
     )
 
     if not response.text:
-        print("❌ Gemini returned no text. Possible safety block or empty response.")
-        return None
+        raise Exception("Gemini returned no text. Possible safety block or empty response.")
 
     json_string = response.text.strip()
     if json_string.startswith('```'):
@@ -152,8 +144,7 @@ def get_perfect_song_match(summary):
         data = json.loads(json_string)
         return get_real_spotify_url(data.get("song_name"))
     except json.JSONDecodeError:
-        print(f"❌ Failed to parse JSON from Gemini: {json_string}")
-        return None
+        raise Exception(f"Failed to parse JSON from Gemini: {json_string}")
 
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name)
@@ -191,10 +182,75 @@ def download_spotify_as_mp3(url):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([f"scsearch1:{search_query}"])
         except Exception as e2:
-            print(f"❌ SoundCloud fallback also failed: {e2}")
-            return None
+            raise Exception(f"SoundCloud fallback also failed: {e2}")
 
     return f"{output}.mp3"
+
+def process_video_gen(filename):
+    yield "Step 1: Uploading video to tmpfiles.org..."
+    try:
+        cloud_link = upload_to_tmpfiles(filename)
+        yield f"Upload successful: {cloud_link}"
+    except Exception as e:
+        yield f"Error: {str(e)}"
+        return
+
+    yield "Step 2: Sending video to Memories.ai..."
+    try:
+        video_id = send_link_to_ai(cloud_link)
+        yield f"Video accepted. ID: {video_id}"
+    except Exception as e:
+        yield f"Error: {str(e)}"
+        return
+
+    yield "Step 3: Waiting for AI processing..."
+    while True:
+        try:
+            status = check_video_status(video_id)
+            if status == "PARSE":
+                yield "AI processing complete."
+                break
+            elif status == "FAIL":
+                yield "Error: AI processing failed."
+                return
+            else:
+                yield "Waiting for AI..."
+                time.sleep(3)
+        except Exception as e:
+             yield f"Error checking status: {str(e)}"
+             time.sleep(3)
+
+    yield "Step 4: Fetching video summary..."
+    try:
+        summary = get_summary(video_id)
+        yield f"Summary fetched: {summary[:50]}..."
+    except Exception as e:
+        yield f"Error: {str(e)}"
+        return
+
+    yield "Step 5: Matching song with Gemini AI..."
+    try:
+        spotify_link = get_perfect_song_match(summary)
+        if not spotify_link:
+            yield "Error: No matching song found."
+            return
+        yield f"Match found: {spotify_link}"
+    except Exception as e:
+        yield f"Error: {str(e)}"
+        return
+
+    yield "Step 6: Downloading song as MP3..."
+    try:
+        mp3_path = download_spotify_as_mp3(spotify_link)
+        if not mp3_path or not os.path.exists(mp3_path):
+             yield "Error: MP3 download failed."
+             return
+        yield "Download complete."
+    except Exception as e:
+        yield f"Error: {str(e)}"
+        return
+
+    yield f"SUCCESS: {mp3_path}"
 
 # --- FASTAPI WRAPPER (ONLY INPUT/OUTPUT CHANGE) ---
 
@@ -203,35 +259,36 @@ app = FastAPI()
 @app.post("/upload")
 def upload_video(file: UploadFile = File(...)):
     filename = file.filename
-
     with open(filename, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    cloud_link = upload_to_tmpfiles(filename)
-    if not cloud_link:
-        return JSONResponse({"error": "tmpfiles upload failed"}, 500)
+    generator = process_video_gen(filename)
+    last_message = ""
 
-    video_id = send_link_to_ai(cloud_link)
-    if not video_id or not wait_for_ready(video_id):
-        return JSONResponse({"error": "video processing failed"}, 500)
+    for message in generator:
+        print(message)
+        last_message = message
+        if message.startswith("Error:"):
+            return JSONResponse({"error": message}, 500)
 
-    summary = get_summary(video_id)
-    if not summary:
-        return JSONResponse({"error": "summary failed"}, 500)
+    if last_message.startswith("SUCCESS:"):
+        mp3_path = last_message.replace("SUCCESS: ", "")
+        return FileResponse(
+            mp3_path,
+            media_type="audio/mpeg",
+            filename=os.path.basename(mp3_path)
+        )
 
-    spotify_link = get_perfect_song_match(summary)
+    return JSONResponse({"error": "Process incomplete", "last_message": last_message}, 500)
 
-    # If spotify_link is None (Gemini failed or Spotify search failed), we can't download.
-    if not spotify_link:
-         return JSONResponse({"error": "failed to find a matching song"}, 500)
+@app.post("/debug")
+def debug_video(file: UploadFile = File(...)):
+    filename = file.filename
+    with open(filename, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    mp3_path = download_spotify_as_mp3(spotify_link)
+    def stream_generator():
+        for message in process_video_gen(filename):
+            yield message + "\n"
 
-    if not mp3_path or not os.path.exists(mp3_path):
-        return JSONResponse({"error": "mp3 download failed"}, 500)
-
-    return FileResponse(
-        mp3_path,
-        media_type="audio/mpeg",
-        filename=os.path.basename(mp3_path)
-    )
+    return StreamingResponse(stream_generator(), media_type="text/plain")
