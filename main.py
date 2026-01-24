@@ -43,7 +43,8 @@ def upload_to_tmpfiles(filename):
     url = "https://tmpfiles.org/api/v1/upload"
     try:
         with open(filename, 'rb') as f:
-            response = requests.post(url, files={'file': f})
+            files_dict = {'file': f}
+            response = requests.post(url, files=files_dict)
         if response.status_code == 200:
             data = response.json()
             if data.get('status') == 'success':
@@ -57,17 +58,20 @@ def upload_to_tmpfiles(filename):
         return None
 
 def send_link_to_ai(video_url):
-    print("🔗 Sending link to Memories.ai...")
+    print(f"\n🔗 Sending link to Memories.ai...")
     endpoint = "https://api.memories.ai/serve/api/v1/upload_url"
     headers = {"Authorization": MEMORIES_API_KEY}
     payload = {"url": video_url}
-    response = requests.post(endpoint, headers=headers, data=payload)
-    if response.status_code == 200:
-        data = response.json()
-        if data.get("success"):
-            vid_id = data['data']['videoNo']
-            print(f"✅ AI Accepted Video! ID: {vid_id}")
-            return vid_id
+    try:
+        response = requests.post(endpoint, headers=headers, data=payload)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                vid_id = data['data']['videoNo']
+                print(f"✅ AI Accepted Video! ID: {vid_id}")
+                return vid_id
+    except Exception as e:
+        print(f"❌ Connection Error: {e}")
     return None
 
 def wait_for_ready_gen(video_id):
@@ -75,21 +79,25 @@ def wait_for_ready_gen(video_id):
     endpoint = "https://api.memories.ai/serve/api/v1/list_videos"
     headers = {"Authorization": MEMORIES_API_KEY}
     while True:
-        response = requests.post(endpoint, headers=headers, json={"video_no": video_id})
-        if response.status_code == 200:
-            data = response.json()
-            videos = data.get("data", {}).get("videos", [])
-            if videos:
-                status = videos[0].get("status")
-                if status == "PARSE":
-                    yield "✅ Video is Ready!"
-                    yield True
-                    return
-                if status == "FAIL":
-                    yield False
-                    return
-        yield "."
-        time.sleep(3)
+        try:
+            response = requests.post(endpoint, headers=headers, json={"video_no": video_id})
+            if response.status_code == 200:
+                data = response.json()
+                videos = data.get("data", {}).get("videos", [])
+                if videos:
+                    status = videos[0].get("status")
+                    if status == "PARSE":
+                        yield "\n✅ Video is Ready!"
+                        yield True
+                        return
+                    elif status == "FAIL":
+                        yield False
+                        return
+            yield "."
+            time.sleep(3)
+        except:
+            yield False
+            return
 
 def wait_for_ready(video_id):
     gen = wait_for_ready_gen(video_id)
@@ -111,19 +119,24 @@ def get_summary(video_id):
     if response.status_code == 200:
         data = response.json()
         if data.get("success"):
-            return data['data']['summary']
+            summary_text = data['data']['summary']
+            print("\n" + "="*30 + "\n✨ VIDEO SUMMARY ✨\n" + "="*30)
+            print(summary_text)
+            return summary_text
     return None
 
 # --- MUSIC MATCHING & DOWNLOAD HANDOFF ---
 
 def get_real_spotify_url(song_name):
-    if not sp:
-        return None
-    results = sp.search(q=song_name, limit=1, type='track')
-    items = results.get('tracks', {}).get('items', [])
-    if items:
-        return items[0]['external_urls']['spotify']
-    return None
+    if not sp: return "Spotify Not Connected"
+    try:
+        results = sp.search(q=song_name, limit=1, type='track')
+        items = results.get('tracks', {}).get('items', [])
+        if items:
+            return items[0]['external_urls']['spotify']
+    except:
+        pass
+    return "Link not found on Spotify"
 
 def get_perfect_song_match(summary):
     print("🔎 Searching trending charts for your vibe...")
@@ -132,58 +145,80 @@ def get_perfect_song_match(summary):
     prompt = f"""
     1. Search for CURRENT trending Instagram Reels/TikTok songs (July 2025 till now) that match this specific vibe: "{summary}".
     3. Pick the SINGLE best song match from the **top lists of Instagram story add music feature**.
-    4. Identify the "Trending Start Time".
+    4. Identify the "Trending Start Time" (e.g. the specific guitar loop or beat drop creators use).
 
     OUTPUT FORMAT (Strict JSON):
     {{
       "song_name": "Artist - Song Title",
       "trending_start_time": "0:XX",
-      "reasoning": "Why it fits"
+      "reasoning": "Why this specific song fits the coffee/bed/autumn aesthetic"
     }}
     """
 
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=prompt,
-        config=types.GenerateContentConfig(tools=[search_tool])
-    )
-
-    json_string = response.text.strip()
-    if json_string.startswith('```'):
-        json_string = json_string.split("```")[1]
-
     try:
-        data = json.loads(json_string)
-    except Exception as e:
-        print(f"❌ JSON Parse Error: {e}")
-        print(f"📄 Raw Response: {response.text}")
-        return None
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(tools=[search_tool])
+        )
 
-    return get_real_spotify_url(data.get("song_name"))
+        json_string = response.text.strip()
+        if json_string.startswith('```json') and json_string.endswith('```'):
+            json_string = json_string[len('```json'):-len('```')].strip()
+        elif json_string.startswith('```') and json_string.endswith('```'):
+            # Fallback for just ```
+             json_string = json_string[len('```'):-len('```')].strip()
+
+        data = json.loads(json_string)
+        real_link = get_real_spotify_url(data.get('song_name'))
+
+        print("\n" + "🍂" * 20 + "\n🎵 PERFECT COZY MATCH FOUND 🎵\n" + "🍂" * 20)
+        print(f"🎶 Song:       {data.get('song_name')}")
+        print(f"🔗 Spotify:    {real_link}")
+        print(f"⏱️ Start At:   {data.get('trending_start_time')}")
+        print(f"✨ Vibe:       {data.get('reasoning')}")
+        print("🍂" * 20)
+
+        return real_link
+
+    except Exception as e:
+        print(f"❌ Error in matching: {e}")
+        # Log raw response if possible, though 'response' might not be defined if error happens earlier
+        # print(f"📄 Raw Response: {response.text}")
+        return None
 
 def download_spotify_as_mp3(url):
-    if not url:
+    if not url or "spotify.com" not in url:
+        print("❌ No valid Spotify URL to download.")
         return None
 
-    track = sp.track(url)
-    search_query = f"{track['artists'][0]['name']} - {track['name']} official audio"
-    output = f"{DOWNLOAD_DIR}/{track['name']}"
+    try:
+        track = sp.track(url)
+        search_query = f"{track['artists'][0]['name']} - {track['name']} official audio"
+        output = f"{DOWNLOAD_DIR}/{track['name']}"
 
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': f'{output}.%(ext)s',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'noplaylist': True,
-    }
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': f'{output}.%(ext)s',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'quiet': False, # Keep it verbose like Colab
+            'noplaylist': True,
+        }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([f"ytsearch1:{search_query}"])
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print(f"🚀 Downloading from YouTube: {search_query}")
+            ydl.download([f"ytsearch1:{search_query}"])
 
-    return f"{output}.mp3"
+        print(f"✅ Success! Saved to {output}.mp3")
+        return f"{output}.mp3"
+
+    except Exception as e:
+        print(f"❌ Download Error: {e}")
+        return None
 
 # --- PIPELINE GENERATOR ---
 
@@ -208,7 +243,9 @@ def process_video_pipeline(filename):
         if isinstance(item, bool):
             success = item
         else:
-            yield f"{item}\n"
+            yield f"{item}" # yield exactly what wait_for_ready_gen yields
+            if not item.endswith("\n") and item != ".":
+                 yield "\n"
 
     if not success:
         yield "❌ video processing failed (wait)\n"
