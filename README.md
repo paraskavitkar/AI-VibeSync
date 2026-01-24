@@ -42,10 +42,10 @@ SPOTIFY_CLIENT_SECRET=<your_spotify_client_secret>
 
 ### 3. Install Requirements
 
-Render will automatically install dependencies based on `Requirements.txt`. If running locally:
+Render will automatically install dependencies based on `requirements.txt`. If running locally:
 
 ```bash
-pip install -r Requirements.txt
+pip install -r requirements.txt
 
 ```
 
