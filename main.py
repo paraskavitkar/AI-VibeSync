@@ -2,9 +2,11 @@ import os
 import sys
 import time
 import json
+import re
 import requests
 import spotipy
 import yt_dlp
+from yt_dlp.utils import DownloadError
 from spotipy.oauth2 import SpotifyClientCredentials
 from google import genai
 from google.genai import types
@@ -134,12 +136,27 @@ def get_perfect_song_match(summary):
         config=types.GenerateContentConfig(tools=[search_tool])
     )
 
+    if not response.text:
+        print("❌ Gemini returned no text. Possible safety block or empty response.")
+        return None
+
     json_string = response.text.strip()
     if json_string.startswith('```'):
-        json_string = json_string.split("```")[1]
+        parts = json_string.split("```")
+        if len(parts) > 1:
+            json_string = parts[1].strip()
+            if json_string.lower().startswith("json"):
+                json_string = json_string[4:].strip()
 
-    data = json.loads(json_string)
-    return get_real_spotify_url(data.get("song_name"))
+    try:
+        data = json.loads(json_string)
+        return get_real_spotify_url(data.get("song_name"))
+    except json.JSONDecodeError:
+        print(f"❌ Failed to parse JSON from Gemini: {json_string}")
+        return None
+
+def sanitize_filename(name):
+    return re.sub(r'[\\/*?:"<>|]', "", name)
 
 def download_spotify_as_mp3(url):
     if not url:
@@ -147,7 +164,8 @@ def download_spotify_as_mp3(url):
 
     track = sp.track(url)
     search_query = f"{track['artists'][0]['name']} - {track['name']} official audio"
-    output = f"{DOWNLOAD_DIR}/{track['name']}"
+    safe_name = sanitize_filename(track['name'])
+    output = f"{DOWNLOAD_DIR}/{safe_name}"
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -158,10 +176,23 @@ def download_spotify_as_mp3(url):
             'preferredquality': '192',
         }],
         'noplaylist': True,
+        'nocheckcertificate': True,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([f"ytsearch1:{search_query}"])
+    try:
+        print(f"🎵 Attempting to download via YouTube: {search_query}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"ytsearch1:{search_query}"])
+    except DownloadError as e:
+        print(f"⚠️ YouTube download failed: {e}")
+        print(f"🔄 Trying SoundCloud fallback for: {search_query}")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([f"scsearch1:{search_query}"])
+        except Exception as e2:
+            print(f"❌ SoundCloud fallback also failed: {e2}")
+            return None
 
     return f"{output}.mp3"
 
@@ -170,7 +201,7 @@ def download_spotify_as_mp3(url):
 app = FastAPI()
 
 @app.post("/upload")
-async def upload_video(file: UploadFile = File(...)):
+def upload_video(file: UploadFile = File(...)):
     filename = file.filename
 
     with open(filename, "wb") as buffer:
@@ -189,7 +220,15 @@ async def upload_video(file: UploadFile = File(...)):
         return JSONResponse({"error": "summary failed"}, 500)
 
     spotify_link = get_perfect_song_match(summary)
+
+    # If spotify_link is None (Gemini failed or Spotify search failed), we can't download.
+    if not spotify_link:
+         return JSONResponse({"error": "failed to find a matching song"}, 500)
+
     mp3_path = download_spotify_as_mp3(spotify_link)
+
+    if not mp3_path or not os.path.exists(mp3_path):
+        return JSONResponse({"error": "mp3 download failed"}, 500)
 
     return FileResponse(
         mp3_path,
